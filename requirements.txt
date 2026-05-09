@@ -1,0 +1,4 @@
+ntplib
+pytz
+colorama
+requests
