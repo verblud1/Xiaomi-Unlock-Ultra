@@ -1,7 +1,15 @@
 """
-Xiaomi Unlock Ultra v7.2 (improved)
+Xiaomi Unlock Ultra v7.3
 Требуется Python 3.10+
 Установка зависимостей: pip install -r requirements.txt
+
+Изменения v7.3:
+  - Повторный прогрев сессий при смене IP перед выстрелом
+  - TLS_REFRESH_TIMEOUT_S увеличен до 1.5s (был 0.3s — таймаутился при высоком RTT)
+  - Многократный TLS refresh: за 8s, 5s, 2s до выстрела (был один раз)
+  - Ступенька потоков исправлена: второй поток стреляет ПОЗЖЕ (+40ms), а не раньше
+  - NTP trimmed mean теперь по offset (выбросы по девиации), а не по tx_time
+  - Статистика: при n<5 показывает min/max вместо псевдо-перцентилей
 """
 
 import hashlib
@@ -52,12 +60,13 @@ NTP_SAMPLES       = 7
 NTP_TRIM          = 2
 GOLDEN_OFFSETS_MS = [10, 40, 70, 100]
 
-TLS_REFRESH_BEFORE_S   = 5.0
+TLS_REFRESH_BEFORE_S   = 9.0   # запас под 3 refresh-а (8s, 5s, 2s)
 NTP_RESYNC_INTERVAL_S  = 300   # периодическая калибровка каждые 5 минут
 MAX_NTP_OFFSET_MS      = 1000  # максимально допустимый offset перед стартом
 THREAD_JOIN_TIMEOUT_S  = 35    # сколько ждём завершения потока
 REQUEST_TIMEOUT_S      = 6.0   # timeout основного выстрела
-TLS_REFRESH_TIMEOUT_S  = 0.3   # timeout TLS-прогрева
+TLS_REFRESH_TIMEOUT_S  = 1.5   # timeout TLS-прогрева (был 0.3 — таймаутился при RTT>300ms)
+TLS_REFRESH_SCHEDULE_S = [8.0, 5.0, 2.0]  # моменты refresh до выстрела (секунд)
 
 TEST_MODE = False
 TEST_DELAY_S = 20
@@ -90,11 +99,24 @@ class Stats:
             sorted_rtt = sorted(self.response_times_ms)
             n = len(sorted_rtt)
             avg = sum(sorted_rtt) / n
-            p50 = sorted_rtt[int(0.50 * (n - 1))]
-            p90 = sorted_rtt[int(0.90 * (n - 1))]
-            p99 = sorted_rtt[int(0.99 * (n - 1))]
+            if n >= 5:
+                p50 = sorted_rtt[int(0.50 * (n - 1))]
+                p90 = sorted_rtt[int(0.90 * (n - 1))]
+                p99 = sorted_rtt[int(0.99 * (n - 1))]
+                rtt_lines = (
+                    f"  {col_w}Среднее RTT: {avg:.1f}ms\n"
+                    f"  {col_w}p50:         {p50:.1f}ms\n"
+                    f"  {col_w}p90:         {p90:.1f}ms\n"
+                    f"  {col_w}p99:         {p99:.1f}ms"
+                )
+            else:
+                rtt_lines = (
+                    f"  {col_w}Среднее RTT: {avg:.1f}ms\n"
+                    f"  {col_w}min:         {sorted_rtt[0]:.1f}ms\n"
+                    f"  {col_w}max:         {sorted_rtt[-1]:.1f}ms"
+                )
         else:
-            avg = p50 = p90 = p99 = 0.0
+            rtt_lines = ""
 
         print(f"\n{col_yb}{'─' * 52}")
         print(f"{col_yb}  ИТОГИ")
@@ -103,11 +125,8 @@ class Stats:
         print(f"  {col_r}Ошибок:      {self.fail}")
         print(f"  {col_r}Таймаутов:   {self.timeout}")
         print(f"  {col_r}Плохой JSON: {self.bad_json}")
-        if self.response_times_ms:
-            print(f"  {col_w}Среднее RTT: {avg:.1f}ms")
-            print(f"  {col_w}p50:         {p50:.1f}ms")
-            print(f"  {col_w}p90:         {p90:.1f}ms")
-            print(f"  {col_w}p99:         {p99:.1f}ms")
+        if rtt_lines:
+            print(rtt_lines)
         print(f"{col_yb}{'─' * 52}\n")
 
 
@@ -168,8 +187,9 @@ def get_accurate_beijing_time(
     if len(samples) < (trim * 2 + 1):
         trim = 0
 
-    samples.sort(key=lambda x: x[0])
-    trimmed      = samples[trim: len(samples) - trim] if trim else samples
+    # Сортируем по |offset| — отрезаем выбросы по девиации, а не по времени ответа
+    samples.sort(key=lambda x: abs(x[1]))
+    trimmed      = samples[: len(samples) - trim] if trim else samples
     mean_tx_time = sum(s[0] for s in trimmed) / len(trimmed)
     mean_offset  = sum(s[1] for s in trimmed) / len(trimmed)
 
@@ -275,7 +295,6 @@ def sync_shot(
     barrier:    threading.Barrier,
     ip:         str,
     token:      str,
-    refresh_pc: float,
 ) -> None:
     try:
         barrier.wait(timeout=10)
@@ -284,11 +303,14 @@ def sync_shot(
         stats.record("fail")
         return
 
-    # TLS refresh за несколько секунд до выстрела
-    hybrid_wait(refresh_pc)
-    refresh_tls(session, ip, token)
+    # Многократный TLS refresh по расписанию (8s, 5s, 2s до выстрела)
+    for secs_before in TLS_REFRESH_SCHEDULE_S:
+        refresh_pc_i = target_pc - secs_before
+        if time.perf_counter() < refresh_pc_i:
+            hybrid_wait(refresh_pc_i)
+        refresh_tls(session, ip, token)
 
-    # Логируем, сколько осталось до выстрела после TLS refresh
+    # Логируем, сколько осталось до выстрела после последнего TLS refresh
     now_pc = time.perf_counter()
     delta_ms = (target_pc - now_pc) * 1000
     log(f"Thread-{index:02d}", col_w,
@@ -385,7 +407,7 @@ def ensure_ntp_ok() -> tuple[datetime, float, float]:
 def main() -> None:
     os.system("cls" if os.name == "nt" else "clear")
     print(f"{col_yb}╔════════════════════════════════════════════════════╗")
-    print(f"{col_yb}║   XIAOMI UNLOCK ULTRA v7.2 | ADAPTIVE LAG+JITTER   ║")
+    print(f"{col_yb}║   XIAOMI UNLOCK ULTRA v7.3 | ADAPTIVE LAG+JITTER   ║")
     print(f"{col_yb}╚════════════════════════════════════════════════════╝\n")
 
     sessions: list[requests.Session] = []
@@ -554,6 +576,25 @@ def main() -> None:
             if new_ip != resolved_ip:
                 warn(f"IP изменился перед выстрелом: {resolved_ip} → {new_ip}")
                 resolved_ip = new_ip
+
+                # Перепрогреваем все сессии на новом IP
+                print(f"{col_b}[WARM] {col_w}Повторный прогрев сессий на новом IP...")
+                def _rewarm(args):
+                    i, (sess, tok) = args
+                    ok = warm_up_session(sess, resolved_ip, tok)
+                    label = f"{col_g}OK" if ok else f"{col_r}FAIL"
+                    with print_lock:
+                        print(f"  Сессия {i + 1}: {label}")
+                    return ok
+
+                with ThreadPoolExecutor(max_workers=len(sessions)) as pool:
+                    rewarm_results = list(pool.map(_rewarm, enumerate(zip(sessions, valid_tokens))))
+
+                failed = [i for i, ok in enumerate(rewarm_results) if not ok]
+                if failed:
+                    warn(f"Повторный прогрев: {len(failed)} сессий не прошли ({failed})")
+                else:
+                    print(f"{col_g}[✔]    Все сессии перепрогреты на новом IP")
             else:
                 print(f"\n{col_g}[DNS]   IP не изменился перед выстрелом: {resolved_ip}")
         except Exception:
@@ -588,12 +629,11 @@ def main() -> None:
             base_shift_ms += jitter * 0.5 * lag_coeff
 
             for k in range(per_token_threads):
-                extra = -60 * k if k > 0 else 0
+                extra = +40 * k  # fallback-поток стреляет позже на 40ms (был -60ms — стрелял раньше)
                 shift_ms   = max(0.0, base_shift_ms + extra)
 
                 target_dt  = target_beijing - timedelta(milliseconds=shift_ms)
                 target_pc  = mono_anchor + (target_dt - beijing_anchor).total_seconds()
-                refresh_pc = target_pc - TLS_REFRESH_BEFORE_S
 
                 thread_args.append({
                     "index":      len(thread_args) + 1,
@@ -602,7 +642,6 @@ def main() -> None:
                     "prepared":   prepared,
                     "ip":         resolved_ip,
                     "token":      token,
-                    "refresh_pc": refresh_pc,
                 })
 
                 with print_lock:
