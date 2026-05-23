@@ -13,6 +13,9 @@ Ultra Sniper для пк и серверов
 команда для проверки пинга до xiaomi:
 
 првоерить https ответ(программа полагается на него):
+curl -sk -o /dev/null -w "%{http_code} | RTT: %{time_total}s\n" https://sgp-api.buy.mi.com/bbs/api/global/user/bl-switch/state
+
+
 
 в независимости от того, какой результат был получен в первые несколько минут после "00:00:00" по Пекину делаем следующие:
  # 
