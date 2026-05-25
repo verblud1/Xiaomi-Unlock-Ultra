@@ -603,6 +603,17 @@ def main() -> None:
             else:
                 time.sleep(0.02)
 
+        # 7.5 Повторная проверка DNS ближе к окну
+        try:
+            new_ip = socket.gethostbyname(TARGET_HOST)
+            if new_ip != resolved_ip:
+                warn(f"IP изменился перед выстрелом: {resolved_ip} → {new_ip}")
+                resolved_ip = new_ip
+            else:
+                print(f"\n{col_g}[DNS]   IP не изменился перед выстрелом: {resolved_ip}")
+        except Exception:
+            warn("Не удалось повторно проверить DNS перед выстрелом")
+
         # 8. Подготовка аргументов потоков
         shot_url    = f"https://{resolved_ip}{TARGET_PATH}"
         thread_args = []
