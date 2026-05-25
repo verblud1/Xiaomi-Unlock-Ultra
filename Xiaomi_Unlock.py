@@ -52,9 +52,13 @@ TARGET_HOST       = "sgp-api.buy.mi.com"
 TARGET_PATH       = "/bbs/api/global/apply/bl-auth"
 STATUS_PATH       = "/bbs/api/global/user/bl-switch/state"
 NTP_SERVERS       = [
-    "ntp2.vniiftri.ru", "0.ru.pool.ntp.org", "1.ru.pool.ntp.org",
-    "2.ru.pool.ntp.org", "3.ru.pool.ntp.org", "time.cloudflare.com",
-    "pool.ntp.org",
+    "time.cloudflare.com",      # anycast, ~1ms из Сингапура
+    "sg.pool.ntp.org",          # Сингапур
+    "asia.pool.ntp.org",        # Азия
+    "cn.pool.ntp.org",          # Китай — близко к серверу Xiaomi
+    "ntp.aliyun.com",           # Alibaba, Китай
+    "ntp.tencent.com",          # Tencent, Китай
+    "pool.ntp.org",             # fallback
 ]
 NTP_SAMPLES       = 7
 NTP_TRIM          = 2
